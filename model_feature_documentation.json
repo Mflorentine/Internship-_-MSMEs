@@ -1,0 +1,29 @@
+{
+  "model_name": "Random Forest (tuned)",
+  "calibration_method": "Isotonic",
+  "classification_threshold": 0.3333333333333333,
+  "n_features": 20,
+  "features": [
+    "Hour",
+    "HR",
+    "O2Sat",
+    "Temp",
+    "SBP",
+    "MAP",
+    "DBP",
+    "Resp",
+    "BaseExcess",
+    "FiO2",
+    "pH",
+    "Glucose",
+    "Potassium",
+    "Hct",
+    "Age",
+    "Gender",
+    "Unit1",
+    "Unit2",
+    "HospAdmTime",
+    "ICULOS"
+  ],
+  "target": "SepsisLabel"
+}
