@@ -1,0 +1,6 @@
+streamlit
+streamlit-option-menu
+joblib
+numpy
+scikit-learn==1.9.0
+pandas
