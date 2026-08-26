@@ -150,6 +150,16 @@ def mark_reviewed(assessment_id, note=""):
     conn.close()
 
 
+def fetch_all_as_csv_bytes():
+    """Export every row in the assessments table as CSV bytes, for backup/reporting.
+    Important given Streamlit Cloud's local storage is wiped on redeploy/sleep."""
+    import pandas as pd
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query("SELECT * FROM assessments ORDER BY submitted_at DESC", conn)
+    conn.close()
+    return df.to_csv(index=False).encode("utf-8"), len(df)
+
+
 init_db()
 
 # -------------------------------------------------------------------
@@ -485,6 +495,16 @@ elif selected == 'Doctor Review':
 
         show_only_unreviewed = st.toggle("Show only unreviewed", value=True)
         rows = fetch_assessments(only_unreviewed=show_only_unreviewed)
+
+        csv_bytes, total_count = fetch_all_as_csv_bytes()
+        st.download_button(
+            f"⬇️ Download all {total_count} records as CSV",
+            data=csv_bytes,
+            file_name=f"sepsis_assessments_{dt.date.today().isoformat()}.csv",
+            mime="text/csv",
+        )
+        st.caption("Exports every record regardless of the toggle above -- useful as a "
+                   "backup, since local storage is cleared on redeploy.")
 
         if not rows:
             st.info("No assessments to show right now.")
