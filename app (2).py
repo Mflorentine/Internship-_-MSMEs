@@ -413,17 +413,40 @@ if selected == 'Clinician Dashboard':
                     st.markdown(f"- {step}")
 
             st.write("")
-            if st.button("📤 Send to Doctor for Review"):
+            if not st.session_state.get("pending_send"):
+                if st.button("📤 Send to Doctor for Review"):
+                    st.session_state["pending_send"] = True
+                    st.rerun()
+            else:
                 label = patient_label.strip() if patient_label.strip() else "Unlabeled patient"
-                save_assessment(
-                    patient_label=label,
-                    submitted_by=st.session_state.user["name"],
-                    probability=result["probability"],
-                    risk_label=result["risk_label"],
-                    inputs=result["inputs"],
-                )
-                st.success(f"Sent to Doctor Review: {label} ({result['risk_label']}).")
-                st.session_state["last_result"] = None
+                st.markdown(f"""
+                <div class="alert-banner" style="background:#FFF6E5; border-color:#F0D9A6; color:var(--moderate);">
+                    ⚠️ Confirm before sending: <strong>{label}</strong> — {risk_badge(result['risk_label'])}
+                    ({result['probability']*100:.1f}% predicted probability). This will notify the doctor queue.
+                </div>
+                """, unsafe_allow_html=True)
+                confirm_col, cancel_col = st.columns(2)
+                with confirm_col:
+                    if st.button("✅ Yes, send it", key="confirm_send"):
+                        save_assessment(
+                            patient_label=label,
+                            submitted_by=st.session_state.user["name"],
+                            probability=result["probability"],
+                            risk_label=result["risk_label"],
+                            inputs=result["inputs"],
+                        )
+                        st.session_state["last_result"] = None
+                        st.session_state["pending_send"] = False
+                        st.session_state["send_success"] = f"{label} ({result['risk_label']})"
+                        st.rerun()
+                with cancel_col:
+                    if st.button("✖ Cancel", key="cancel_send"):
+                        st.session_state["pending_send"] = False
+                        st.rerun()
+
+        if st.session_state.get("send_success"):
+            st.success(f"Sent to Doctor Review: {st.session_state['send_success']}.")
+            st.session_state["send_success"] = None
 
         st.write("")
         st.markdown(
