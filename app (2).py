@@ -160,6 +160,28 @@ def fetch_all_as_csv_bytes():
     return df.to_csv(index=False).encode("utf-8"), len(df)
 
 
+def fetch_by_submitter(submitted_by):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM assessments WHERE submitted_by = ? ORDER BY submitted_at DESC",
+        (submitted_by,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def fetch_by_submitter_as_csv_bytes(submitted_by):
+    import pandas as pd
+    conn = sqlite3.connect(DB_PATH)
+    df = pd.read_sql_query(
+        "SELECT * FROM assessments WHERE submitted_by = ? ORDER BY submitted_at DESC",
+        conn, params=(submitted_by,),
+    )
+    conn.close()
+    return df.to_csv(index=False).encode("utf-8"), len(df)
+
+
 init_db()
 
 # -------------------------------------------------------------------
@@ -457,6 +479,31 @@ if selected == 'Clinician Dashboard':
         if st.session_state.get("send_success"):
             st.success(f"Sent to Doctor Review: {st.session_state['send_success']}.")
             st.session_state["send_success"] = None
+
+        st.write("")
+        with st.container(border=True):
+            st.markdown('<div class="section-label">📜 My Submissions</div>', unsafe_allow_html=True)
+            my_rows = fetch_by_submitter(st.session_state.user["name"])
+
+            if not my_rows:
+                st.caption("You haven't sent any assessments to a doctor yet.")
+            else:
+                my_csv_bytes, my_count = fetch_by_submitter_as_csv_bytes(st.session_state.user["name"])
+                st.download_button(
+                    f"⬇️ Download my {my_count} submissions as CSV",
+                    data=my_csv_bytes,
+                    file_name=f"my_sepsis_submissions_{dt.date.today().isoformat()}.csv",
+                    mime="text/csv",
+                )
+                st.write("")
+                for row in my_rows:
+                    status = "✅ Reviewed" if row["reviewed"] else "⏳ Awaiting review"
+                    note_line = f" — Doctor's note: {row['doctor_note']}" if row["reviewed"] and row["doctor_note"] else ""
+                    st.markdown(
+                        f"{risk_badge(row['risk_label'])} &nbsp; **{row['patient_label']}** "
+                        f"&nbsp;·&nbsp; {row['submitted_at']} &nbsp;·&nbsp; {status}{note_line}",
+                        unsafe_allow_html=True,
+                    )
 
         st.write("")
         st.markdown(
