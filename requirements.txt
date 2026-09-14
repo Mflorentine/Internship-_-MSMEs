@@ -1,5 +1,6 @@
 streamlit
 streamlit-option-menu
+bcrypt
 joblib
 numpy
 scikit-learn==1.9.0
