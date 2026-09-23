@@ -82,15 +82,20 @@ CLINICAL_GUIDANCE = {
 }
 
 # ---------------------------------------------------------------------------
-# DEMO CREDENTIALS -- accounts and password hashes live in Streamlit secrets, not in
-# source code. Passwords are never stored or compared in plaintext: each account holds
-# a bcrypt hash, checked with bcrypt.checkpw() at login time. See secrets.toml.example
-# for the expected structure and how to provision this on Streamlit Cloud.
+# ACCOUNTS -- two sources, merged at login time:
+#  1. SECRET_USERS: bootstrap accounts from Streamlit secrets (immutable from inside
+#     the app -- st.secrets cannot be written to at runtime). At minimum, this must
+#     contain one Admin account so someone can create everyone else.
+#  2. Accounts created or password-reset later via the in-app Admin panel, stored in
+#     the user_accounts table. These take precedence over a secrets-defined account
+#     with the same username, so an Admin can rotate even a bootstrap password.
+# Passwords are never stored or compared in plaintext: every account holds a bcrypt
+# hash, checked with bcrypt.checkpw() at login time.
 # ---------------------------------------------------------------------------
 try:
-    USERS = {uname: dict(udata) for uname, udata in st.secrets["users"].items()}
+    SECRET_USERS = {uname: dict(udata) for uname, udata in st.secrets["users"].items()}
 except (KeyError, FileNotFoundError, AttributeError):
-    USERS = {}
+    SECRET_USERS = {}
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
@@ -102,12 +107,69 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
         return False
 
 
+def get_all_users():
+    """Merge bootstrap accounts (Streamlit secrets) with accounts created or
+    password-reset at runtime via the Admin panel (stored in SQLite). Called fresh
+    on every login attempt, not cached, so a newly created account works immediately
+    without redeploying the app."""
+    merged = dict(SECRET_USERS)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT * FROM user_accounts").fetchall()
+    except sqlite3.OperationalError:
+        rows = []  # table not created yet on a brand-new database
+    conn.close()
+    for row in rows:
+        merged[row["username"]] = {
+            "password_hash": row["password_hash"],
+            "role": row["role"],
+            "name": row["name"],
+        }
+    return merged
+
+
+def create_or_reset_account(username, password, role, name):
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO user_accounts (username, password_hash, role, name, created_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, "
+        "role = excluded.role, name = excluded.name",
+        (username, password_hash, role, name, dt.datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+
+
+def fetch_all_accounts_overview():
+    """For the Admin panel's account list -- shows every account and where it's
+    defined, without ever exposing a password or password hash."""
+    accounts = []
+    for uname, udata in SECRET_USERS.items():
+        accounts.append({"username": uname, "name": udata.get("name", ""), "role": udata.get("role", ""), "source": "Streamlit secrets"})
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute("SELECT username, name, role FROM user_accounts").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    db_usernames = {r["username"] for r in rows}
+    accounts = [a for a in accounts if a["username"] not in db_usernames]  # DB overrides secrets
+    for row in rows:
+        accounts.append({"username": row["username"], "name": row["name"], "role": row["role"], "source": "Created/reset via Admin panel"})
+    return accounts
+
+
 # Formal role-permission mapping (RBAC), checked server-side wherever a protected
 # action happens, rather than scattering ad hoc "if role == ..." checks throughout
 # the page logic. Mirrors the authorization.py pattern in the authentication spec.
 ROLE_PERMISSIONS = {
     "Clinician": {"submit_assessment", "view_own_submissions"},
     "Doctor": {"review_assessments", "view_all_submissions", "view_auth_activity"},
+    "Admin": {"manage_accounts", "view_auth_activity"},
 }
 
 
@@ -141,6 +203,15 @@ def init_db():
             username TEXT,
             event_type TEXT,
             event_status TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_accounts (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT,
+            role TEXT,
+            name TEXT,
             created_at TEXT
         )
     """)
@@ -405,7 +476,8 @@ if "user" not in st.session_state:
 
 
 def login_form(required_role: str):
-    if not USERS:
+    all_users = get_all_users()
+    if not all_users:
         st.error("No user accounts are configured. An administrator needs to set up "
                  "accounts in Streamlit secrets before anyone can log in.")
         return
@@ -421,7 +493,7 @@ def login_form(required_role: str):
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
     if submitted:
-        account = USERS.get(username)
+        account = all_users.get(username)
         password_ok = account and verify_password(password, account.get("password_hash", ""))
         if password_ok and account["role"] == required_role:
             st.session_state.user = {"username": username, **account}
@@ -440,9 +512,9 @@ def login_form(required_role: str):
 with st.sidebar:
     selected = option_menu(
         'Sepsis Prediction System',
-        ['Clinician Dashboard', 'Doctor Review', 'Patient & Family'],
+        ['Clinician Dashboard', 'Doctor Review', 'Patient & Family', 'Admin'],
         menu_icon='hospital-fill',
-        icons=['clipboard2-pulse', 'stethoscope', 'people-fill'],
+        icons=['clipboard2-pulse', 'stethoscope', 'people-fill', 'shield-lock'],
         default_index=0,
         styles={
             "container": {"background-color": "#F6F8F7"},
@@ -733,7 +805,7 @@ elif selected == 'Doctor Review':
 # =====================================================================
 # PATIENT & FAMILY VIEW — educational + symptom self-check, no ML model
 # =====================================================================
-else:
+elif selected == 'Patient & Family':
     st.markdown("""
     <div class="app-header">
         <div class="icon">💙</div>
@@ -863,3 +935,91 @@ else:
         'concerns about your or a loved one\'s condition, speak with a member of your care team.</p>',
         unsafe_allow_html=True,
     )
+
+# =====================================================================
+# ADMIN VIEW — create accounts and reset passwords. This is what actually makes
+# account creation and password recovery possible: Streamlit secrets cannot be
+# edited from inside the running app, so any in-app account management has to be
+# backed by the database instead (see get_all_users() above).
+# =====================================================================
+else:
+    if not st.session_state.user or not has_permission(st.session_state.user["role"], "manage_accounts"):
+        st.markdown("""
+        <div class="app-header">
+            <div class="icon">🛡️</div>
+            <div>
+                <p class="title">Admin</p>
+                <p class="subtitle">Log in to create accounts or reset passwords.</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        login_form("Admin")
+
+    else:
+        st.markdown("""
+        <div class="app-header">
+            <div class="icon">🛡️</div>
+            <div>
+                <p class="title">Account Administration</p>
+                <p class="subtitle">Create a new account, or reset an existing one's password.</p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.container(border=True):
+            st.markdown('<div class="section-label">➕ Create or Reset an Account</div>', unsafe_allow_html=True)
+            st.caption("Using a username that already exists resets that account's password "
+                       "and updates its name/role, rather than creating a duplicate.")
+            with st.form("admin_account_form", clear_on_submit=True):
+                acc_username = st.text_input("Username", key="admin_acc_username")
+                acc_name = st.text_input("Full name", key="admin_acc_name")
+                acc_role = st.selectbox("Role", ["Clinician", "Doctor", "Admin"], key="admin_acc_role")
+                acc_password = st.text_input("Password (min. 8 characters)", type="password", key="admin_acc_password")
+                acc_password_confirm = st.text_input("Confirm password", type="password", key="admin_acc_password_confirm")
+                acc_submitted = st.form_submit_button("Save Account")
+
+            if acc_submitted:
+                existing_users = get_all_users()
+                is_reset = acc_username in existing_users
+                if not acc_username or not acc_name or not acc_password:
+                    st.error("Username, full name, and password are all required.")
+                elif len(acc_password) < 8:
+                    st.error("Password must be at least 8 characters.")
+                elif acc_password != acc_password_confirm:
+                    st.error("Passwords do not match.")
+                else:
+                    create_or_reset_account(acc_username, acc_password, acc_role, acc_name)
+                    log_auth_event(
+                        st.session_state.user["username"],
+                        "PASSWORD_RESET" if is_reset else "ACCOUNT_CREATED",
+                        "SUCCESS",
+                    )
+                    action_word = "reset" if is_reset else "created"
+                    st.success(f"Account for {acc_name} ({acc_username}) was {action_word} successfully.")
+
+        st.write("")
+        with st.container(border=True):
+            st.markdown('<div class="section-label">👥 All Accounts</div>', unsafe_allow_html=True)
+            accounts = fetch_all_accounts_overview()
+            if not accounts:
+                st.caption("No accounts found.")
+            else:
+                import pandas as pd
+                st.dataframe(pd.DataFrame(accounts), hide_index=True, width="stretch")
+
+        st.write("")
+        with st.container(border=True):
+            st.markdown('<div class="section-label">🔐 Recent Authentication Activity</div>', unsafe_allow_html=True)
+            audit_df = fetch_auth_audit(limit=25)
+            if audit_df.empty:
+                st.caption("No authentication events recorded yet.")
+            else:
+                st.dataframe(audit_df, hide_index=True, width="stretch")
+
+        st.write("")
+        st.markdown(
+            '<p class="footnote">Account data is stored in the app\'s local database, which is '
+            'cleared when the app redeploys or sleeps from inactivity (see the deployment notes '
+            'in the User Guide). Re-create any accounts made here if that happens.</p>',
+            unsafe_allow_html=True,
+        )
