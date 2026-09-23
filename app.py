@@ -92,10 +92,35 @@ CLINICAL_GUIDANCE = {
 # Passwords are never stored or compared in plaintext: every account holds a bcrypt
 # hash, checked with bcrypt.checkpw() at login time.
 # ---------------------------------------------------------------------------
+# DEFAULT_DEMO_USERS: built-in accounts so the app is usable immediately, without
+# anyone having to set up a secrets.toml file or Streamlit Cloud Secrets panel first.
+# These are for demoing/testing only -- change these passwords (or remove this dict
+# entirely and switch to secrets.toml) before using this with any real patient data.
+# Same bcrypt-hash-and-checkpw scheme as every other account; nothing is stored in
+# plaintext.
+#   clinician1 / clinician123
+#   doctor1    / doctor123
+DEFAULT_DEMO_USERS = {
+    "clinician1": {
+        "password_hash": "$2b$12$EikCMR7q3fUWqCFKUyM09uJXrQV.lh7VE52HngSM5x3uwLQti5b8m",
+        "role": "Clinician",
+        "name": "Demo Clinician",
+    },
+    "doctor1": {
+        "password_hash": "$2b$12$mk0fBVwgcNwNvqcpmrkdH.uG5pbp3gmrlMMPImbeesm2lAYJaVa/6",
+        "role": "Doctor",
+        "name": "Demo Doctor",
+    },
+}
+
 try:
-    SECRET_USERS = {uname: dict(udata) for uname, udata in st.secrets["users"].items()}
+    _CONFIGURED_SECRET_USERS = {uname: dict(udata) for uname, udata in st.secrets["users"].items()}
 except (KeyError, FileNotFoundError, AttributeError):
-    SECRET_USERS = {}
+    _CONFIGURED_SECRET_USERS = {}
+
+# Secrets-configured accounts take precedence over the built-in demo ones if a
+# username collides (e.g. you define your own "clinician1" in secrets.toml later).
+SECRET_USERS = {**DEFAULT_DEMO_USERS, **_CONFIGURED_SECRET_USERS}
 
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
