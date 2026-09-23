@@ -449,11 +449,22 @@ div.stButton > button:hover { background: var(--teal-dark); color: white; }
 """, unsafe_allow_html=True)
 
 
+# Lower edge of the MODERATE band. Testing this model against the real training
+# data showed predicted probabilities are heavily skewed toward 0 (an expected
+# result of sepsis being a rare event, ~2% of rows): the vast majority of patients
+# score near 0%, confirmed-sepsis rows commonly score anywhere from ~9% up to 100%.
+# Using half the HIGH threshold (previously threshold * 0.5, i.e. ~16.7%-33.3%) left
+# MODERATE too narrow a band for real predictions to ever land in, so cases jumped
+# straight from LOW to HIGH. This fixed, lower edge gives MODERATE a realistic,
+# reachable range: any non-trivial risk signal below the confirmed HIGH cutoff.
+MODERATE_LOWER_BOUND = 0.05
+
+
 def risk_gauge_html(probability: float, threshold: float):
     pct = max(0.0, min(1.0, probability)) * 100
     if probability >= threshold:
         color, label = "var(--high)", "HIGH RISK"
-    elif probability >= threshold * 0.5:
+    elif probability >= MODERATE_LOWER_BOUND:
         color, label = "var(--moderate)", "MODERATE RISK"
     else:
         color, label = "var(--low)", "LOW RISK"
