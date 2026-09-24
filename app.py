@@ -112,16 +112,17 @@ DEFAULT_DEMO_USERS = {
         "password_hash": "$2b$12$AOdFx7ABJGne.TLFa.OVI.si5PQxcj3PvrufA7rGVf0Agp1E65Vmy",
         "role": "Admin",
         "name": "Demo Admin",
+        "email": "muflorentine4@gmail.com",
     },
     "clinician1": {
         "password_hash": "$2b$12$EikCMR7q3fUWqCFKUyM09uJXrQV.lh7VE52HngSM5x3uwLQti5b8m",
         "role": "Clinician",
-        "name": "Demo Clinician",
+        "name": "florentinemukamana@gmail.com",
     },
     "doctor1": {
         "password_hash": "$2b$12$mk0fBVwgcNwNvqcpmrkdH.uG5pbp3gmrlMMPImbeesm2lAYJaVa/6",
         "role": "Doctor",
-        "name": "Demo Doctor",
+        "name": "muflorentine3@gmail.com",
     },
 }
 
