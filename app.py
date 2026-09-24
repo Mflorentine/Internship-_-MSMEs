@@ -112,17 +112,16 @@ DEFAULT_DEMO_USERS = {
         "password_hash": "$2b$12$AOdFx7ABJGne.TLFa.OVI.si5PQxcj3PvrufA7rGVf0Agp1E65Vmy",
         "role": "Admin",
         "name": "Demo Admin",
-        "email": "muflorentine4@gmail.com",
     },
     "clinician1": {
         "password_hash": "$2b$12$EikCMR7q3fUWqCFKUyM09uJXrQV.lh7VE52HngSM5x3uwLQti5b8m",
         "role": "Clinician",
-        "name": "florentinemukamana@gmail.com",
+        "name": "Demo Clinician",
     },
     "doctor1": {
         "password_hash": "$2b$12$mk0fBVwgcNwNvqcpmrkdH.uG5pbp3gmrlMMPImbeesm2lAYJaVa/6",
         "role": "Doctor",
-        "name": "muflorentine3@gmail.com",
+        "name": "Demo Doctor",
     },
 }
 
@@ -698,6 +697,27 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 
+def get_app_base_url():
+    """Figures out the URL people use to reach this app, so reset links can be
+    built without you having to configure anything. Streamlit can see the URL the
+    visitor's browser is actually using (st.context.url) and that's used first;
+    the [app] base_url secret is only a manual override for unusual setups (e.g.
+    behind a reverse proxy that changes the visible URL)."""
+    try:
+        override = st.secrets["app"]["base_url"]
+        if override:
+            return override.rstrip("/")
+    except (KeyError, FileNotFoundError, AttributeError):
+        pass
+    try:
+        detected = st.context.url
+        if detected:
+            return detected.rstrip("/")
+    except Exception:
+        pass
+    return None
+
+
 def render_forgot_password(required_role: str):
     with st.expander("Forgot your password?"):
         method = st.radio(
@@ -741,17 +761,18 @@ def render_forgot_password(required_role: str):
                                 "link has been sent to it.")
                 if account and account.get("role") == required_role and account.get("email"):
                     token = create_password_reset_token(username)
-                    try:
-                        base_url = st.secrets["app"]["base_url"].rstrip("/")
+                    base_url = get_app_base_url()
+                    if not base_url:
+                        st.error("Couldn't figure out this app's own URL to build the reset link. "
+                                  "Try again in a normal browser tab, or ask an admin to set "
+                                  "[app] base_url in Secrets as a manual override.")
+                    else:
                         reset_link = f"{base_url}/?reset_token={token}"
                         ok, msg = send_reset_email(account["email"], reset_link)
                         if not ok:
                             st.error(msg)  # e.g. SMTP not configured -- an admin needs to know this
                         else:
                             st.success(generic_msg)
-                    except (KeyError, FileNotFoundError, AttributeError):
-                        st.error("This app's own URL isn't configured yet, so reset links can't be "
-                                  "built. An administrator needs to add [app] base_url to Secrets.")
                 else:
                     st.success(generic_msg)
 
