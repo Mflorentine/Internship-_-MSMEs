@@ -207,18 +207,20 @@ def fetch_all_accounts_overview():
     defined, without ever exposing a password or password hash."""
     accounts = []
     for uname, udata in SECRET_USERS.items():
-        accounts.append({"username": uname, "name": udata.get("name", ""), "role": udata.get("role", ""), "source": "Streamlit secrets"})
+        accounts.append({"username": uname, "name": udata.get("name", ""), "role": udata.get("role", ""),
+                          "email": udata.get("email") or "(not set)", "source": "Streamlit secrets"})
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute("SELECT username, name, role FROM user_accounts").fetchall()
+        rows = conn.execute("SELECT username, name, role, email FROM user_accounts").fetchall()
     except sqlite3.OperationalError:
         rows = []
     conn.close()
     db_usernames = {r["username"] for r in rows}
     accounts = [a for a in accounts if a["username"] not in db_usernames]  # DB overrides secrets
     for row in rows:
-        accounts.append({"username": row["username"], "name": row["name"], "role": row["role"], "source": "Created/reset via Admin panel"})
+        accounts.append({"username": row["username"], "name": row["name"], "role": row["role"],
+                          "email": row["email"] or "(not set)", "source": "Created/reset via Admin panel"})
     return accounts
 
 
