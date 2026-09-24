@@ -2,10 +2,16 @@ import os
 import json
 import sqlite3
 import datetime as dt
+import secrets as secrets_lib
+import smtplib
+from email.mime.text import MIMEText
 
 import bcrypt
 import joblib
 import numpy as np
+import pyotp
+import qrcode
+import io
 import streamlit as st
 from streamlit_option_menu import option_menu
 
@@ -156,22 +162,44 @@ def get_all_users():
             "password_hash": row["password_hash"],
             "role": row["role"],
             "name": row["name"],
+            "email": row["email"] if "email" in row.keys() else None,
         }
     return merged
 
 
-def create_or_reset_account(username, password, role, name):
+def create_or_reset_account(username, password, role, name, email=None):
     password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
-        "INSERT INTO user_accounts (username, password_hash, role, name, created_at) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO user_accounts (username, password_hash, role, name, email, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, "
-        "role = excluded.role, name = excluded.name",
-        (username, password_hash, role, name, dt.datetime.now().isoformat(timespec="seconds")),
+        "role = excluded.role, name = excluded.name, "
+        "email = COALESCE(excluded.email, user_accounts.email)",
+        (username, password_hash, role, name, email, dt.datetime.now().isoformat(timespec="seconds")),
     )
     conn.commit()
     conn.close()
+
+
+def set_account_password(username, new_password):
+    """Used by the self-service reset flows (authenticator code or email link) --
+    updates only the password, leaving role/name/email untouched. Works whether the
+    account originally came from Streamlit secrets or the Admin panel, by copying
+    its current role/name/email into user_accounts (which always wins in
+    get_all_users)."""
+    users = get_all_users()
+    account = users.get(username)
+    if not account:
+        return False
+    create_or_reset_account(
+        username=username,
+        password=new_password,
+        role=account["role"],
+        name=account.get("name", username),
+        email=account.get("email"),
+    )
+    return True
 
 
 def fetch_all_accounts_overview():
@@ -192,6 +220,132 @@ def fetch_all_accounts_overview():
     for row in rows:
         accounts.append({"username": row["username"], "name": row["name"], "role": row["role"], "source": "Created/reset via Admin panel"})
     return accounts
+
+
+# -------------------------------------------------------------------
+# Self-service password reset: authenticator (TOTP) codes and email links
+# -------------------------------------------------------------------
+RESET_TOKEN_LIFETIME_MINUTES = 30
+
+
+def get_totp_secret(username):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT secret, enabled FROM user_totp WHERE username = ?", (username,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def start_totp_enrollment(username):
+    """Generates a brand-new secret and stores it as not-yet-enabled. Nothing takes
+    effect until confirm_totp_enrollment verifies the person actually scanned it and
+    can produce a valid code -- otherwise a half-finished setup could lock them out."""
+    secret = pyotp.random_base32()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO user_totp (username, secret, enabled, created_at) VALUES (?, ?, 0, ?) "
+        "ON CONFLICT(username) DO UPDATE SET secret = excluded.secret, enabled = 0",
+        (username, secret, dt.datetime.now().isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+    return secret
+
+
+def confirm_totp_enrollment(username, code):
+    row = get_totp_secret(username)
+    if not row or not pyotp.TOTP(row["secret"]).verify(code, valid_window=1):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE user_totp SET enabled = 1 WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def verify_totp_code(username, code):
+    row = get_totp_secret(username)
+    if not row or not row["enabled"]:
+        return False
+    return pyotp.TOTP(row["secret"]).verify(code, valid_window=1)
+
+
+def totp_qr_png_bytes(username, secret):
+    uri = pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name="Sepsis Risk Assistant")
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def create_password_reset_token(username):
+    token = secrets_lib.token_urlsafe(32)
+    now = dt.datetime.now()
+    expires = now + dt.timedelta(minutes=RESET_TOKEN_LIFETIME_MINUTES)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO password_resets (token, username, created_at, expires_at, used) "
+        "VALUES (?, ?, ?, ?, 0)",
+        (token, username, now.isoformat(timespec="seconds"), expires.isoformat(timespec="seconds")),
+    )
+    conn.commit()
+    conn.close()
+    return token
+
+
+def get_valid_reset_token(token):
+    """Returns the username for a token that exists, hasn't been used, and hasn't
+    expired -- or None if any of that fails, without distinguishing which (so a
+    guessed/expired/reused token all just look like 'invalid link')."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT username, expires_at, used FROM password_resets WHERE token = ?", (token,)
+    ).fetchone()
+    conn.close()
+    if not row or row["used"]:
+        return None
+    if dt.datetime.now() > dt.datetime.fromisoformat(row["expires_at"]):
+        return None
+    return row["username"]
+
+
+def consume_reset_token(token):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE password_resets SET used = 1 WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+
+
+def send_reset_email(to_email, reset_link):
+    """Sends the reset link over SMTP using credentials from st.secrets['smtp'].
+    Returns (success, message) rather than raising, so the caller can show a clean
+    error in the UI instead of a stack trace when SMTP isn't configured yet."""
+    try:
+        smtp_cfg = st.secrets["smtp"]
+    except (KeyError, FileNotFoundError, AttributeError):
+        return False, ("Email sending isn't configured yet. An administrator needs to add "
+                        "an [smtp] section to this app's Secrets before reset links can be sent.")
+    body = (
+        "You (or someone else) requested a password reset for the Sepsis Risk Assistant.\n\n"
+        f"Reset your password here (link expires in {RESET_TOKEN_LIFETIME_MINUTES} minutes):\n"
+        f"{reset_link}\n\n"
+        "If you didn't request this, you can safely ignore this email."
+    )
+    msg = MIMEText(body)
+    msg["Subject"] = "Reset your Sepsis Risk Assistant password"
+    msg["From"] = smtp_cfg["sender"]
+    msg["To"] = to_email
+    try:
+        with smtplib.SMTP(smtp_cfg["host"], int(smtp_cfg.get("port", 587))) as server:
+            server.starttls()
+            server.login(smtp_cfg["username"], smtp_cfg["password"])
+            server.sendmail(smtp_cfg["sender"], [to_email], msg.as_string())
+        return True, "Reset link sent."
+    except Exception as e:
+        return False, f"Couldn't send the email: {e}"
 
 
 # Formal role-permission mapping (RBAC), checked server-side wherever a protected
@@ -244,6 +398,30 @@ def init_db():
             role TEXT,
             name TEXT,
             created_at TEXT
+        )
+    """)
+    # Added later than the original table -- ALTER only succeeds once per DB file,
+    # so an existing deployment's table gets the column added on next startup
+    # instead of needing a fresh database.
+    try:
+        conn.execute("ALTER TABLE user_accounts ADD COLUMN email TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_totp (
+            username TEXT PRIMARY KEY,
+            secret TEXT NOT NULL,
+            enabled INTEGER DEFAULT 0,
+            created_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS password_resets (
+            token TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            created_at TEXT,
+            expires_at TEXT,
+            used INTEGER DEFAULT 0
         )
     """)
     conn.commit()
@@ -517,6 +695,103 @@ if "user" not in st.session_state:
     st.session_state.user = None
 
 
+def render_forgot_password(required_role: str):
+    with st.expander("Forgot your password?"):
+        method = st.radio(
+            "How do you want to reset it?",
+            ["Enter my authenticator code", "Email me a reset link"],
+            key=f"reset_method_{required_role}",
+        )
+        all_users = get_all_users()
+
+        if method == "Enter my authenticator code":
+            with st.form(f"totp_reset_form_{required_role}"):
+                username = st.text_input("Username", key=f"totp_reset_user_{required_role}")
+                code = st.text_input("6-digit code from your authenticator app",
+                                      key=f"totp_reset_code_{required_role}")
+                new_pw = st.text_input("New password", type="password",
+                                        key=f"totp_reset_pw_{required_role}")
+                go = st.form_submit_button("Verify & set new password")
+            if go:
+                account = all_users.get(username)
+                if not account or account.get("role") != required_role:
+                    st.error(f"No {required_role} account found with that username.")
+                elif not verify_totp_code(username, code.strip()):
+                    st.error("That code is invalid or has expired. Codes refresh every 30 seconds "
+                              "-- check your authenticator app and try the latest one.")
+                elif len(new_pw) < 8:
+                    st.error("Choose a password of at least 8 characters.")
+                else:
+                    set_account_password(username, new_pw)
+                    log_auth_event(username, "PASSWORD_RESET_TOTP", "SUCCESS")
+                    st.success("Password updated. You can log in with your new password now.")
+
+        else:  # Email me a reset link
+            with st.form(f"email_reset_form_{required_role}"):
+                username = st.text_input("Username", key=f"email_reset_user_{required_role}")
+                send = st.form_submit_button("Send reset link")
+            if send:
+                account = all_users.get(username)
+                # Same message whether the username exists or not, so this can't be used
+                # to probe which usernames are valid accounts.
+                generic_msg = ("If that account exists and has an email on file, a reset "
+                                "link has been sent to it.")
+                if account and account.get("role") == required_role and account.get("email"):
+                    token = create_password_reset_token(username)
+                    try:
+                        base_url = st.secrets["app"]["base_url"].rstrip("/")
+                        reset_link = f"{base_url}/?reset_token={token}"
+                        ok, msg = send_reset_email(account["email"], reset_link)
+                        if not ok:
+                            st.error(msg)  # e.g. SMTP not configured -- an admin needs to know this
+                        else:
+                            st.success(generic_msg)
+                    except (KeyError, FileNotFoundError, AttributeError):
+                        st.error("This app's own URL isn't configured yet, so reset links can't be "
+                                  "built. An administrator needs to add [app] base_url to Secrets.")
+                else:
+                    st.success(generic_msg)
+
+
+def render_reset_landing_page():
+    """Full-screen 'set a new password' view shown when someone opens a reset-link
+    URL (?reset_token=...). Takes over the whole page via st.stop() so nothing else
+    renders underneath it."""
+    token = st.query_params.get("reset_token")
+    if not token:
+        return
+    st.markdown("""
+    <div class="app-header">
+        <div class="icon">🔑</div>
+        <div><p class="title">Reset your password</p></div>
+    </div>
+    """, unsafe_allow_html=True)
+    username = get_valid_reset_token(token)
+    if not username:
+        st.error("This reset link is invalid or has expired. Reset links are only valid for "
+                  f"{RESET_TOKEN_LIFETIME_MINUTES} minutes and can only be used once -- "
+                  "request a new one from the login page.")
+        st.stop()
+    with st.form("reset_landing_form"):
+        new_pw = st.text_input("New password", type="password")
+        confirm_pw = st.text_input("Confirm new password", type="password")
+        submit = st.form_submit_button("Set new password")
+    if submit:
+        if len(new_pw) < 8:
+            st.error("Choose a password of at least 8 characters.")
+        elif new_pw != confirm_pw:
+            st.error("Those passwords don't match.")
+        else:
+            set_account_password(username, new_pw)
+            consume_reset_token(token)
+            log_auth_event(username, "PASSWORD_RESET_EMAIL", "SUCCESS")
+            st.success("Password updated. You can close this tab and log in with your new password.")
+    st.stop()
+
+
+render_reset_landing_page()
+
+
 def login_form(required_role: str):
     all_users = get_all_users()
     if not all_users:
@@ -546,6 +821,7 @@ def login_form(required_role: str):
             # which part (username vs. password vs. role) was wrong.
             log_auth_event(username or "(blank)", "LOGIN", "FAILED")
             st.error(f"Invalid credentials, or this account is not a {required_role} account.")
+    render_forgot_password(required_role)
 
 
 # -------------------------------------------------------------------
@@ -571,6 +847,33 @@ with st.sidebar:
             log_auth_event(st.session_state.user["username"], "LOGOUT", "SUCCESS")
             st.session_state.user = None
             st.rerun()
+
+        _me = st.session_state.user["username"]
+        _totp_row = get_totp_secret(_me)
+        with st.expander("🔑 Authenticator (for password resets)"):
+            if _totp_row and _totp_row["enabled"]:
+                st.caption("✅ Set up. If you're locked out later, use the code from your "
+                           "authenticator app on the login page's 'Forgot your password?' link.")
+                if st.button("Replace with a new authenticator", key="totp_redo"):
+                    st.session_state["totp_pending_secret"] = start_totp_enrollment(_me)
+                    st.rerun()
+            else:
+                st.caption("Scan this QR code with Google Authenticator, Authy, or similar, "
+                           "then enter the 6-digit code it shows to finish setup.")
+                if "totp_pending_secret" not in st.session_state:
+                    st.session_state["totp_pending_secret"] = start_totp_enrollment(_me)
+                pending_secret = st.session_state["totp_pending_secret"]
+                st.image(totp_qr_png_bytes(_me, pending_secret))
+                st.caption(f"Can't scan? Enter this key manually: `{pending_secret}`")
+                confirm_code = st.text_input("Enter the code to confirm setup", key="totp_confirm_code")
+                if st.button("Confirm setup", key="totp_confirm_btn"):
+                    if confirm_totp_enrollment(_me, confirm_code.strip()):
+                        del st.session_state["totp_pending_secret"]
+                        st.success("Authenticator set up. You can use it to reset your password anytime.")
+                        st.rerun()
+                    else:
+                        st.error("That code didn't match. Make sure you scanned the QR above and "
+                                  "are using the current code.")
 
 # =====================================================================
 # CLINICIAN DASHBOARD — assess a patient and send the result to a doctor
@@ -1024,6 +1327,7 @@ else:
             with st.form("admin_account_form", clear_on_submit=True):
                 acc_username = st.text_input("Username", key="admin_acc_username")
                 acc_name = st.text_input("Full name", key="admin_acc_name")
+                acc_email = st.text_input("Email (needed for 'email me a reset link')", key="admin_acc_email")
                 acc_role = st.selectbox("Role", ["Clinician", "Doctor", "Admin"], key="admin_acc_role")
                 acc_password = st.text_input("Password (min. 8 characters)", type="password", key="admin_acc_password")
                 acc_password_confirm = st.text_input("Confirm password", type="password", key="admin_acc_password_confirm")
@@ -1039,7 +1343,8 @@ else:
                 elif acc_password != acc_password_confirm:
                     st.error("Passwords do not match.")
                 else:
-                    create_or_reset_account(acc_username, acc_password, acc_role, acc_name)
+                    create_or_reset_account(acc_username, acc_password, acc_role, acc_name,
+                                             email=acc_email.strip() or None)
                     log_auth_event(
                         st.session_state.user["username"],
                         "PASSWORD_RESET" if is_reset else "ACCOUNT_CREATED",
