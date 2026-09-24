@@ -98,9 +98,15 @@ CLINICAL_GUIDANCE = {
 # entirely and switch to secrets.toml) before using this with any real patient data.
 # Same bcrypt-hash-and-checkpw scheme as every other account; nothing is stored in
 # plaintext.
+#   admin1     / admin123
 #   clinician1 / clinician123
 #   doctor1    / doctor123
 DEFAULT_DEMO_USERS = {
+    "admin1": {
+        "password_hash": "$2b$12$AOdFx7ABJGne.TLFa.OVI.si5PQxcj3PvrufA7rGVf0Agp1E65Vmy",
+        "role": "Admin",
+        "name": "Demo Admin",
+    },
     "clinician1": {
         "password_hash": "$2b$12$EikCMR7q3fUWqCFKUyM09uJXrQV.lh7VE52HngSM5x3uwLQti5b8m",
         "role": "Clinician",
@@ -669,17 +675,26 @@ if selected == 'Clinician Dashboard':
                 confirm_col, cancel_col = st.columns(2)
                 with confirm_col:
                     if st.button("✅ Yes, send it", key="confirm_send"):
-                        save_assessment(
-                            patient_label=label,
-                            submitted_by=st.session_state.user["name"],
-                            probability=result["probability"],
-                            risk_label=result["risk_label"],
-                            inputs=result["inputs"],
-                        )
-                        st.session_state["last_result"] = None
-                        st.session_state["pending_send"] = False
-                        st.session_state["send_success"] = f"{label} ({result['risk_label']})"
-                        st.rerun()
+                        try:
+                            save_assessment(
+                                patient_label=label,
+                                submitted_by=st.session_state.user["name"],
+                                probability=result["probability"],
+                                risk_label=result["risk_label"],
+                                inputs=result["inputs"],
+                            )
+                        except Exception as e:
+                            st.session_state["pending_send"] = False
+                            st.error(
+                                f"Couldn't save this assessment: {e}. "
+                                "This usually means the app's storage folder isn't writable "
+                                "on this deployment -- check with whoever manages the hosting."
+                            )
+                        else:
+                            st.session_state["last_result"] = None
+                            st.session_state["pending_send"] = False
+                            st.session_state["send_success"] = f"{label} ({result['risk_label']})"
+                            st.rerun()
                 with cancel_col:
                     if st.button("✖ Cancel", key="cancel_send"):
                         st.session_state["pending_send"] = False
