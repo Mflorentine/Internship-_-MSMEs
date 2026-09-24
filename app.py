@@ -355,7 +355,7 @@ def send_reset_email(to_email, reset_link):
 # the page logic. Mirrors the authorization.py pattern in the authentication spec.
 ROLE_PERMISSIONS = {
     "Clinician": {"submit_assessment", "view_own_submissions"},
-    "Doctor": {"review_assessments", "view_all_submissions", "view_auth_activity"},
+    "Doctor": {"review_assessments", "view_all_submissions"},
     "Admin": {"manage_accounts", "view_auth_activity"},
 }
 
